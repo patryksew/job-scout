@@ -21,7 +21,7 @@ class Settings(BaseSettings):
 
     llm_base_url: str = "https://generativelanguage.googleapis.com/v1beta/openai/"
     llm_api_key: str = ""
-    llm_model: str = "gemini-2.5-flash"
+    llm_model: str = "gemini-flash-latest"
     llm_rpm_delay: float = 0.0
     llm_reasoning_effort: str = "low"
     llm_concurrency: int = 10

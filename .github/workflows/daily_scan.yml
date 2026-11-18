@@ -89,9 +89,9 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          [ -e data/jobs.db ] && git add -f data/jobs.db
-          [ -e data/rejected_log.jsonl ] && git add -f data/rejected_log.jsonl
-          [ -d reports ] && git add -f reports/
+          if [ -e data/jobs.db ]; then git add -f data/jobs.db; fi
+          if [ -e data/rejected_log.jsonl ]; then git add -f data/rejected_log.jsonl; fi
+          if [ -d reports ]; then git add -f reports/; fi
           if ! git diff --staged --quiet; then
             git commit -m "chore: update job-scout state and reports [skip ci]"
             git push
