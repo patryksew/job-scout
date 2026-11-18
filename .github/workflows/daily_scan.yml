@@ -13,6 +13,16 @@ on:
         required: false
         default: ''
         type: string
+      code_repository:
+        description: 'Public job-scout source repository (owner/repo)'
+        required: false
+        default: 'patryksew/job-scout'
+        type: string
+      code_ref:
+        description: 'Branch, tag, or SHA of the public job-scout source repository'
+        required: false
+        default: 'master'
+        type: string
   workflow_dispatch:
     inputs:
       dry_run:
@@ -36,15 +46,16 @@ jobs:
       - name: Checkout calling repository
         uses: actions/checkout@v4
 
-      - name: Checkout public job-scout source (for reusable workflow callers)
-        if: ${{ github.event_name == 'workflow_call' }}
+      - name: Checkout public job-scout source (when called from a data-only repo)
         run: |
-          WORKFLOW_REPO="${GITHUB_WORKFLOW_REF%%/.github/*}"
-          WORKFLOW_REF="${GITHUB_WORKFLOW_REF##*@}"
-          git init /tmp/job-scout-src
-          git -C /tmp/job-scout-src remote add origin "https://github.com/${WORKFLOW_REPO}.git"
-          git -C /tmp/job-scout-src fetch --depth 1 origin "${WORKFLOW_REF}"
-          git -C /tmp/job-scout-src checkout FETCH_HEAD
+          if [ ! -f pyproject.toml ]; then
+            CODE_REPO="${{ inputs.code_repository || 'patryksew/job-scout' }}"
+            CODE_REF="${{ inputs.code_ref || 'master' }}"
+            git init /tmp/job-scout-src
+            git -C /tmp/job-scout-src remote add origin "https://github.com/${CODE_REPO}.git"
+            git -C /tmp/job-scout-src fetch --depth 1 origin "${CODE_REF}"
+            git -C /tmp/job-scout-src checkout FETCH_HEAD
+          fi
 
       - name: Set up uv and Python 3.12
         uses: astral-sh/setup-uv@v4
@@ -53,7 +64,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          if [ "${{ github.event_name }}" = "workflow_call" ]; then
+          if [ -f /tmp/job-scout-src/pyproject.toml ]; then
             uv sync --project /tmp/job-scout-src --frozen
           else
             uv sync --frozen
@@ -68,7 +79,7 @@ jobs:
           LLM_REASONING_EFFORT: ${{ vars.LLM_REASONING_EFFORT || 'low' }}
           LLM_CONCURRENCY: ${{ vars.LLM_CONCURRENCY || '10' }}
         run: |
-          if [ "${{ github.event_name }}" = "workflow_call" ]; then
+          if [ -x /tmp/job-scout-src/.venv/bin/job-scout ]; then
             JOB_SCOUT_BIN="/tmp/job-scout-src/.venv/bin/job-scout"
           else
             JOB_SCOUT_BIN="uv run job-scout"
