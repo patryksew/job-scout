@@ -1,0 +1,36 @@
+# Virtual environments
+.venv/
+venv/
+ENV/
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# Testing & caches
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# Environment secrets & personal data (kept in private data repo, not public code repo)
+.env
+.env.*
+!.env.example
+
+config/profile.yaml
+config/base_cv.md
+
+data/*
+!data/.gitkeep
+
+reports/*
+!reports/.gitkeep
+
+/.idea/

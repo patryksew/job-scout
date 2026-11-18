@@ -1,0 +1,39 @@
+# Copy this file to `.github/workflows/daily_scan.yml` inside your PRIVATE data repo.
+# Your private repo only needs:
+#   - config/profile.yaml
+#   - config/base_cv.md
+#   - data/
+#   - reports/
+#   - .github/workflows/daily_scan.yml (this file)
+#
+# Store LLM_API_KEY in the private repo's Settings -> Secrets and variables -> Actions.
+
+name: Daily Job Scout Scan
+
+on:
+  schedule:
+    - cron: '0 6 * * 1-5'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Run fetch and Stage 1 filter only without calling the LLM or committing state'
+        required: false
+        default: false
+        type: boolean
+      limit:
+        description: 'Optional max number of Stage 1 survivors to evaluate'
+        required: false
+        default: ''
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  scan:
+    # Replace <YOUR_GITHUB_USERNAME>/<PUBLIC_REPO> with your public job-scout repo:
+    uses: <YOUR_GITHUB_USERNAME>/job-scout/.github/workflows/daily_scan.yml@master
+    with:
+      dry_run: ${{ inputs.dry_run || false }}
+      limit: ${{ inputs.limit || '' }}
+    secrets: inherit

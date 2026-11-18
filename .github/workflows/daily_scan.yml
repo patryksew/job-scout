@@ -1,0 +1,100 @@
+name: Daily Job Scout Scan
+
+on:
+  workflow_call:
+    inputs:
+      dry_run:
+        description: 'Run fetch and Stage 1 filter only without calling the LLM or committing state'
+        required: false
+        default: false
+        type: boolean
+      limit:
+        description: 'Optional max number of Stage 1 survivors to evaluate'
+        required: false
+        default: ''
+        type: string
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Run fetch and Stage 1 filter only without calling the LLM or committing state'
+        required: false
+        default: false
+        type: boolean
+      limit:
+        description: 'Optional max number of Stage 1 survivors to evaluate'
+        required: false
+        default: ''
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout calling repository
+        uses: actions/checkout@v4
+
+      - name: Checkout public job-scout source (for reusable workflow callers)
+        if: ${{ github.event_name == 'workflow_call' }}
+        run: |
+          WORKFLOW_REPO="${GITHUB_WORKFLOW_REF%%/.github/*}"
+          WORKFLOW_REF="${GITHUB_WORKFLOW_REF##*@}"
+          git init /tmp/job-scout-src
+          git -C /tmp/job-scout-src remote add origin "https://github.com/${WORKFLOW_REPO}.git"
+          git -C /tmp/job-scout-src fetch --depth 1 origin "${WORKFLOW_REF}"
+          git -C /tmp/job-scout-src checkout FETCH_HEAD
+
+      - name: Set up uv and Python 3.12
+        uses: astral-sh/setup-uv@v4
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_call" ]; then
+            uv sync --project /tmp/job-scout-src --frozen
+          else
+            uv sync --frozen
+          fi
+
+      - name: Run job-scout
+        env:
+          LLM_BASE_URL: ${{ vars.LLM_BASE_URL || 'https://generativelanguage.googleapis.com/v1beta/openai/' }}
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          LLM_MODEL: ${{ vars.LLM_MODEL || 'gemini-flash-latest' }}
+          LLM_RPM_DELAY: ${{ vars.LLM_RPM_DELAY || '0.0' }}
+          LLM_REASONING_EFFORT: ${{ vars.LLM_REASONING_EFFORT || 'low' }}
+          LLM_CONCURRENCY: ${{ vars.LLM_CONCURRENCY || '10' }}
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_call" ]; then
+            JOB_SCOUT_BIN="/tmp/job-scout-src/.venv/bin/job-scout"
+          else
+            JOB_SCOUT_BIN="uv run job-scout"
+          fi
+
+          ARGS=""
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            ARGS="$ARGS --dry-run"
+          fi
+          if [ -n "${{ inputs.limit }}" ]; then
+            ARGS="$ARGS --limit ${{ inputs.limit }}"
+          fi
+
+          $JOB_SCOUT_BIN run $ARGS
+
+      - name: Commit and push updated DB, logs, and reports
+        if: ${{ inputs.dry_run != true }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          [ -e data/jobs.db ] && git add -f data/jobs.db
+          [ -e data/rejected_log.jsonl ] && git add -f data/rejected_log.jsonl
+          [ -d reports ] && git add -f reports/
+          if ! git diff --staged --quiet; then
+            git commit -m "chore: update job-scout state and reports [skip ci]"
+            git push
+          else
+            echo "No changes to commit."
+          fi

@@ -1,0 +1,82 @@
+# ==============================================================================
+# job-scout — Candidate Profile Schema & Template
+# Copy this file to config/profile.yaml and fill in your criteria.
+# Validated by ProfileConfig in src/job_scout/config.py.
+# ==============================================================================
+
+# [int, 1-10, default: 7]
+# Minimum Stage 2 LLM match_score required for an offer to be shortlisted.
+# Offers scoring below this threshold are logged to data/rejected_log.jsonl.
+min_match_score: 7
+
+# ------------------------------------------------------------------------------
+# Stage 1: Deterministic Rule-Based Pre-Filter (src/job_scout/filter.py)
+# ------------------------------------------------------------------------------
+
+# [list[str], default: []]
+# Core technologies — at least ONE must match in title, skills, or description.
+# Word-boundary matching is used (e.g. "Go" won't match "Google").
+# Leave empty [] to disable this check.
+must_have_any_tech:
+  - "" # e.g. Python
+  - "" # e.g. FastAPI
+  - "" # e.g. SQL
+
+# [list[str], default: []]
+# Deal-breaker keywords or phrases checked case-insensitively across title,
+# experience level, skills, and full description.
+exclude_keywords:
+  - "" # e.g. "5+ years"
+  - "" # e.g. "Principal"
+  - "" # e.g. "PHP"
+
+# [list[str], default: ["remote", "hybrid"]]
+# Allowed work modes. Valid normalized values: "remote", "hybrid", "onsite".
+allowed_workplace_types:
+  - remote
+  - hybrid
+  # - onsite
+
+# [list[str], default: []]
+# Cities accepted when workplace_type is "hybrid" or "onsite" (case-insensitive).
+# Include both Polish and English spellings if applicable.
+# Leave empty [] to allow any city for hybrid/onsite roles.
+allowed_cities:
+  - "" # e.g. Warszawa
+  - "" # e.g. Warsaw
+
+# [int | null, default: null]
+# Minimum monthly salary threshold in PLN.
+# Rejects ONLY when salary is disclosed and salary_max_pln < min_salary_pln.
+# Undisclosed salaries are never rejected at Stage 1. Set to null to disable.
+min_salary_pln: null # e.g. 9000
+
+# ------------------------------------------------------------------------------
+# Stage 2: Cloud LLM Semantic Evaluation (src/job_scout/evaluator.py)
+# ------------------------------------------------------------------------------
+
+# [dict[str, Any], default: {}]
+# Arbitrary structured preferences passed to the LLM prompt as JSON.
+# Add, remove, or rename keys freely to match what matters to you.
+preferences:
+  target_levels:
+    - "" # e.g. junior, mid, regular
+  preferred_domains:
+    - "" # e.g. Backend Engineering, AI/LLM Engineering
+  contract_types:
+    - "" # e.g. B2B, UoP, UZ
+  languages:
+    - "" # e.g. Polish, English
+
+# [str, default: ""]
+# Free-text expectations passed directly to the LLM alongside config/base_cv.md.
+# Describe ideal projects, growth goals, and red flags / roles to avoid.
+# (The LLM evaluates offers in Polish, so Polish or English text works well.)
+free_text_expectations: |
+  [Opisz tutaj swoje oczekiwania wobec roli, technologii i zespołu]
+
+  Czego szukam:
+  - ...
+
+  Czego chcę unikać:
+  - ...
