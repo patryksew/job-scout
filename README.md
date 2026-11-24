@@ -1,17 +1,17 @@
 # job-scout
 
-Automated IT job aggregator, deterministic rule filter, cloud LLM semantic evaluator, and interactive Markdown/HTML reporter for **SOLID.Jobs** and **Just Join IT** — designed to run locally and fully automated on **GitHub Actions**.
+Automated IT job aggregator, deterministic rule filter, cloud LLM semantic evaluator, and interactive Markdown/HTML reporter for **SOLID.Jobs**, **Just Join IT**, **No Fluff Jobs**, **Bulldogjob**, **the:protocol**, and **Pracuj.pl (dział IT)** — designed to run locally and fully automated on **GitHub Actions**.
 
 ## Architecture
 
 ```
-SOLID.Jobs API ──► Normalize ──┐
-                               ├──► Cross-Portal Dedup (SQLite + 30d SHA-256)
-Just Join IT API               │
-  ├─► Targeted Query           │
-  ├─► Lightweight Pre-Filter ──┤
-  └─► Detail Fetch (jitter) ───┘
-                               ▼
+SOLID.Jobs (REST JSON) ─────────┐
+Just Join IT (REST JSON) ───────┤
+No Fluff Jobs (Search+Detail) ──┼──► Fail-Soft Runner + Cross-Portal Dedup
+Bulldogjob (SSR __NEXT_DATA__) ─┤    (SQLite + 30d Normalized Fingerprint)
+the:protocol (SSR __NEXT_DATA__)┤
+Pracuj.pl IT (SSR __NEXT_DATA__)┘
+                                ▼
                  Stage 1: Deterministic Rules (config/profile.yaml)
                     ├── Rejected ──► SQLite (rejected_rule) + data/rejected_log.jsonl
                     ▼
@@ -20,22 +20,28 @@ Just Join IT API               │
                     ▼
                  Shortlisted ──► Rich Terminal + YYYY-MM-DD_HH-MM_report.{md,html}
                                                + YYYY-MM-DD_master.{md,html}
+                                               (with Source Health table at top)
 ```
 
 ## Key Features
 
-- **Async Portal Scrapers (`httpx`):**
-  - **SOLID.Jobs:** Queries the public IT offers API (`?campaign=job-scout`) with automatic pagination and retry/backoff.
-  - **Just Join IT:** Queries targeted categories (`python`, `go`, `ai`, `data`, `devops`, `c`, `other`) and experience levels (`intern`, `junior`, `mid`), running Stage 1 lightweight metadata filtering *before* fetching individual offer descriptions with `0.5–1.2s` polite jitter.
-- **Cross-Portal Deduplication (`sqlite3`):** Skips seen `(source, external_id)` offers and detects cross-posted duplicates within 30 days via `sha256(lowercase(company) + "|" + lowercase(title))`.
+- **Async Multi-Portal Scrapers (pure `httpx`, fail-soft isolation & per-source config):**
+  - **SOLID.Jobs (`solid.jobs`):** Public IT offers REST API (`?campaign=job-scout`) with automatic pagination and retry/backoff.
+  - **Just Join IT (`justjoin.it`):** Targeted categories and seniority queries with lightweight Stage 1 metadata filtering *before* detail fetches.
+  - **No Fluff Jobs (`nofluffjobs`):** `POST /api/search/posting` filtered by profile (`city`, `category`, `seniority`) + `GET /api/posting/{id}` with polite `0.5–1.5s` delay, UoP/B2B salary normalization, and `musts`/`nices` mapping.
+  - **Bulldogjob (`bulldogjob`):** Next.js SSR `__NEXT_DATA__` paginated listings filtered by city and experience level + detail page enrichment.
+  - **the:protocol (`theprotocol`):** Next.js SSR `__NEXT_DATA__` targeted queries (city + remote Poland) with required/optional tech and UoP/B2B salary parsing.
+  - **Pracuj.pl IT (`pracuj.pl`):** Tightly scoped `it.pracuj.pl` SSR `__NEXT_DATA__` queries (`its=backend,ai-ml,big-data-science`, Junior/Mid `et` levels, Warsaw & remote) to avoid pulling irrelevant listings.
+- **Cross-Portal Deduplication (`sqlite3`):** Skips seen `(source, external_id)` offers and detects cross-posted duplicates within 30 days via a normalized `(company, title)` SHA-256 fingerprint (stripping legal suffixes like `Sp. z o.o.`, `S.A.`, city/remote/gender tags, punctuation, and extra spaces) with safe automatic SQLite schema migration (`ALTER TABLE`).
 - **Two-Stage Filtering & Calibration Log:**
   - **Stage 1 (`filter.py`):** Deterministic filtering (`must_have_any_tech` with word boundaries, `exclude_keywords`, `allowed_workplace_types`, `allowed_cities`, and `min_salary_pln` while preserving undisclosed salaries).
   - **Stage 2 (`evaluator.py`):** Concurrent evaluation via OpenAI-compatible cloud endpoints (Google Gemini, OpenRouter, or OpenAI) using Structured Outputs (`JobEvaluation` Pydantic schema) with `reasoning_effort` support and exponential backoff retries.
   - **Auditability:** Every rule and LLM rejection is saved to `data/rejected_log.jsonl` with its exact reason to spot false negatives and calibrate `config/profile.yaml`.
 - **Interactive Reports (`reporter.py`):**
+  - **Source Health Table:** Displayed at the top of terminal, Markdown, and HTML reports (`Portal | Pobrane | Po pre-filtrze | Duplikaty | Ocenione LLM | Status/Błąd`).
   - **Timestamped Run Snapshots** (`reports/YYYY-MM-DD_HH-MM_report.{md,html}`) so multiple scans in a day never overwrite earlier results.
   - **Daily Master Reports** (`reports/YYYY-MM-DD_master.{md,html}`) consolidating all findings for that day.
-  - **Standalone HTML Dashboard:** Dark/light CSS, client-side filtering by match score (`Poziom dopasowania`), work mode (`remote` / `hybrid` / `onsite`), and normalized city (`Miasto`), sorting by score or publication date (`Najnowsze`), plus a collapsible calibration section.
+  - **Standalone HTML Dashboard:** Dark/light CSS, client-side filtering by match score (`Poziom dopasowania`), work mode (`remote` / `hybrid` / `onsite`), normalized city (`Miasto`), and portal (`Portal`), sorting by score or publication date (`Najnowsze`), plus a collapsible calibration section.
 
 ## Quick Start (Local)
 
@@ -64,13 +70,19 @@ Just Join IT API               │
 ## CLI Usage
 
 ```bash
-# Dry-run: fetch + Stage 1 deterministic filter + terminal preview (no LLM calls, no DB writes)
+# Dry-run: fetch + Stage 1 deterministic filter + dedup + terminal preview (no LLM calls, no DB writes)
 uv run job-scout run --dry-run
+
+# Test a single portal scraper in dry-run mode
+uv run job-scout run --source nofluffjobs --dry-run
+uv run job-scout run --source bulldogjob --dry-run
+uv run job-scout run --source theprotocol --dry-run
+uv run job-scout run --source pracuj.pl --dry-run
 
 # Cheap prompt calibration: evaluate at most 5 Stage 1 survivors
 uv run job-scout run --limit 5
 
-# Full scan: fetch -> dedup -> filter -> concurrent LLM evaluation -> DB & reports
+# Full scan across all enabled sources
 uv run job-scout run
 
 # View database summary & top rejection reasons from data/rejected_log.jsonl

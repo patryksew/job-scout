@@ -9,17 +9,17 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
 from job_scout.database import DatabaseManager
-from job_scout.models import EvaluatedOffer, JobOffer, RejectionRecord
+from job_scout.models import EvaluatedOffer, JobOffer, RejectionRecord, SourceRunStats
 
 
 class RunMetrics(BaseModel):
-    """Pipeline execution counters for terminal and file reports."""
+    """Pipeline execution counters and per-source health for terminal and file reports."""
 
     fetched: int = 0
     duplicates_skipped: int = 0
@@ -27,6 +27,7 @@ class RunMetrics(BaseModel):
     llm_rejected: int = 0
     shortlisted: int = 0
     dry_run: bool = False
+    source_stats: list[SourceRunStats] = Field(default_factory=list)
 
 
 _CITY_ALIASES = {
@@ -80,14 +81,47 @@ def _format_salary(offer: JobOffer) -> str:
     return f"{lo} – {hi} PLN"
 
 
+def _md_escape(text: str) -> str:
+    """Escape pipe characters and newlines for Markdown table cells."""
+    return " ".join(text.replace("|", "\\|").splitlines()).strip()
+
+
 def print_run_summary(
     console: Console,
     metrics: RunMetrics,
     shortlisted: list[EvaluatedOffer],
     survivors_preview: list[JobOffer] | None = None,
+    sample_offers_preview: list[JobOffer] | None = None,
 ) -> None:
-    """Render summary metrics and shortlisted offers (or dry-run survivors) to terminal."""
+    """Render per-portal health, summary metrics, and shortlisted/dry-run offers to terminal."""
     mode_label = " [yellow](DRY-RUN)[/yellow]" if metrics.dry_run else ""
+
+    if metrics.source_stats:
+        health_table = Table(title=f"Kondycja źródeł{mode_label}", show_header=True)
+        health_table.add_column("Portal", style="bold magenta")
+        health_table.add_column("Pobrane", justify="right")
+        health_table.add_column("Po pre-filtrze", justify="right", style="cyan")
+        health_table.add_column("Duplikaty", justify="right")
+        health_table.add_column("Ocenione LLM", justify="right")
+        health_table.add_column("Status/Błąd")
+
+        for stat in metrics.source_stats:
+            if stat.error:
+                status_cell = f"[red]{stat.status_display}[/red]"
+            elif stat.status.lower() in {"wyłączony", "pominięty"}:
+                status_cell = f"[dim]{stat.status_display}[/dim]"
+            else:
+                status_cell = f"[green]{stat.status_display}[/green]"
+            health_table.add_row(
+                stat.source,
+                str(stat.fetched),
+                str(stat.passed_prefilter),
+                str(stat.duplicates_skipped),
+                str(stat.llm_evaluated),
+                status_cell,
+            )
+        console.print(health_table)
+
     summary_table = Table(title=f"Job-Scout Run Summary{mode_label}", show_header=True)
     summary_table.add_column("Metric", style="bold cyan")
     summary_table.add_column("Count", justify="right", style="bold white")
@@ -141,15 +175,41 @@ def print_run_summary(
         preview_table.add_column("Role & Company", style="bold")
         preview_table.add_column("Mode / Location", style="cyan")
         preview_table.add_column("Salary (PLN)")
+        preview_table.add_column("Level / Skills")
         for offer in survivors_preview[:15]:
             locs = ", ".join(offer.locations) if offer.locations else "-"
+            skills_preview = ", ".join(offer.skill_names()[:6]) or "-"
+            lvl = offer.experience_level or "-"
             preview_table.add_row(
                 offer.source,
-                f"{offer.title}\n[dim]{offer.company}[/dim]",
+                f"{offer.title}\n[dim]{offer.company}[/dim]\n[dim]{offer.url}[/dim]",
                 f"{offer.workplace_type} ({locs})",
                 _format_salary(offer),
+                f"{lvl}\n[dim]{skills_preview}[/dim]",
             )
         console.print(preview_table)
+    elif metrics.dry_run and sample_offers_preview:
+        sample_table = Table(
+            title=f"Sample Normalized Offers (0 Stage 1 survivors; showing up to {min(5, len(sample_offers_preview))} fetched)",
+            show_lines=True,
+        )
+        sample_table.add_column("Portal", style="magenta")
+        sample_table.add_column("Role & Company", style="bold")
+        sample_table.add_column("Mode / Location", style="cyan")
+        sample_table.add_column("Salary (PLN)")
+        sample_table.add_column("Level / Skills")
+        for offer in sample_offers_preview[:5]:
+            locs = ", ".join(offer.locations) if offer.locations else "-"
+            skills_preview = ", ".join(offer.skill_names()[:6]) or "-"
+            lvl = offer.experience_level or "-"
+            sample_table.add_row(
+                offer.source,
+                f"{offer.title}\n[dim]{offer.company}[/dim]\n[dim]{offer.url}[/dim]",
+                f"{offer.workplace_type} ({locs})",
+                _format_salary(offer),
+                f"{lvl}\n[dim]{skills_preview}[/dim]",
+            )
+        console.print(sample_table)
     elif not metrics.dry_run:
         console.print(Panel("Brak rekomendowanych ofert w tym przebiegu.", style="yellow"))
 
@@ -210,17 +270,40 @@ def generate_markdown_report(
     lines: list[str] = [
         f"# Job-Scout Raport Dzienny — {report_date.isoformat()}",
         "",
-        "| Metryka | Liczba |",
-        "| --- | ---: |",
-        f"| Pobrane oferty | {metrics.fetched} |",
-        f"| Pominięte duplikaty | {metrics.duplicates_skipped} |",
-        f"| Odrzucone przez reguły (Stage 1) | {metrics.rule_rejected} |",
-        f"| Odrzucone przez LLM (Stage 2) | {metrics.llm_rejected} |",
-        f"| Rekomendowane (Shortlist) | {metrics.shortlisted} |",
-        "",
-        "## Rekomendowane oferty",
-        "",
     ]
+
+    if metrics.source_stats:
+        lines.extend(
+            [
+                "## Kondycja źródeł",
+                "",
+                "| Portal | Pobrane | Po pre-filtrze | Duplikaty | Ocenione LLM | Status/Błąd |",
+                "| --- | ---: | ---: | ---: | ---: | --- |",
+            ]
+        )
+        for stat in metrics.source_stats:
+            lines.append(
+                f"| {_md_escape(stat.source)} | {stat.fetched} | {stat.passed_prefilter} "
+                f"| {stat.duplicates_skipped} | {stat.llm_evaluated} | {_md_escape(stat.status_display)} |"
+            )
+        lines.append("")
+
+    lines.extend(
+        [
+            "## Podsumowanie przebiegu",
+            "",
+            "| Metryka | Liczba |",
+            "| --- | ---: |",
+            f"| Pobrane oferty | {metrics.fetched} |",
+            f"| Pominięte duplikaty | {metrics.duplicates_skipped} |",
+            f"| Odrzucone przez reguły (Stage 1) | {metrics.rule_rejected} |",
+            f"| Odrzucone przez LLM (Stage 2) | {metrics.llm_rejected} |",
+            f"| Rekomendowane (Shortlist) | {metrics.shortlisted} |",
+            "",
+            "## Rekomendowane oferty",
+            "",
+        ]
+    )
 
     if not sorted_shortlist:
         lines.append("_Brak ofert spełniających próg rekomendacji w tym przebiegu._")
@@ -317,6 +400,7 @@ def generate_html_report(
     )
 
     all_cities_set: set[str] = set()
+    all_sources_set: set[str] = set()
     cards_html: list[str] = []
     if not sorted_shortlist:
         cards_html.append(
@@ -327,6 +411,7 @@ def generate_html_report(
             offer = item.offer
             ev = item.evaluation
             score_cls = "score-high" if ev.match_score >= 8 else "score-mid"
+            all_sources_set.add(offer.source)
             norm_cities = _normalize_offer_cities(offer)
             for c in norm_cities:
                 if c != "Nie podano":
@@ -346,6 +431,7 @@ def generate_html_report(
                 <article class="offer-card"
                          data-score="{ev.match_score}"
                          data-workplace="{html.escape(offer.workplace_type)}"
+                         data-source="{html.escape(offer.source)}"
                          data-cities="{html.escape('|'.join(norm_cities))}"
                          data-published="{html.escape(pub_iso)}"
                          data-order="{idx}">
@@ -367,6 +453,53 @@ def generate_html_report(
     city_options_html = "".join(
         f'<option value="{html.escape(city)}">{html.escape(city)}</option>'
         for city in sorted_cities
+    )
+    source_options_html = "".join(
+        f'<option value="{html.escape(src)}">{html.escape(src)}</option>'
+        for src in sorted(all_sources_set)
+    )
+
+    source_health_section = ""
+    if metrics.source_stats:
+        health_rows: list[str] = []
+        for stat in metrics.source_stats:
+            if stat.error:
+                badge_cls = "badge-flag"
+            elif stat.status.lower() in {"wyłączony", "pominięty"}:
+                badge_cls = "badge-muted"
+            else:
+                badge_cls = "badge-ok"
+            health_rows.append(
+                "<tr>"
+                f"<td><strong>{html.escape(stat.source)}</strong></td>"
+                f'<td class="num">{stat.fetched}</td>'
+                f'<td class="num">{stat.passed_prefilter}</td>'
+                f'<td class="num">{stat.duplicates_skipped}</td>'
+                f'<td class="num">{stat.llm_evaluated}</td>'
+                f'<td><span class="badge {badge_cls}">{html.escape(stat.status_display)}</span></td>'
+                "</tr>"
+            )
+        source_health_section = (
+            '<section class="health-section">'
+            "<h2>Kondycja źródeł</h2>"
+            '<div class="table-wrap">'
+            '<table class="health-table" id="source-health-table">'
+            "<thead><tr>"
+            "<th>Portal</th>"
+            '<th class="num">Pobrane</th>'
+            '<th class="num">Po pre-filtrze</th>'
+            '<th class="num">Duplikaty</th>'
+            '<th class="num">Ocenione LLM</th>'
+            "<th>Status/Błąd</th>"
+            "</tr></thead>"
+            f"<tbody>{''.join(health_rows)}</tbody>"
+            "</table></div></section>"
+        )
+
+    subtitle_portals = (
+        ", ".join(s.source for s in metrics.source_stats)
+        if metrics.source_stats
+        else "Agregator ofert IT"
     )
 
     llm_rej_items = "".join(
@@ -522,6 +655,33 @@ def generate_html_report(
     }}
     .badge-flag {{ background: var(--flag-bg); color: var(--flag-fg); }}
     .badge-ok {{ background: var(--ok-bg); color: var(--ok-fg); }}
+    .badge-muted {{ background: var(--border); color: var(--muted); }}
+    .health-section {{ margin-bottom: 1.5rem; }}
+    .health-section h2 {{ margin: 0 0 0.6rem 0; font-size: 1.15rem; }}
+    .table-wrap {{
+      overflow-x: auto;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+    }}
+    .health-table {{
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.9rem;
+    }}
+    .health-table th, .health-table td {{
+      padding: 0.65rem 0.85rem;
+      border-bottom: 1px solid var(--border);
+      text-align: left;
+    }}
+    .health-table tr:last-child td {{ border-bottom: none; }}
+    .health-table th {{
+      font-size: 0.78rem;
+      text-transform: uppercase;
+      letter-spacing: 0.03em;
+      color: var(--muted);
+    }}
+    .health-table .num {{ text-align: right; font-variant-numeric: tabular-nums; }}
     .tips ul {{ margin: 0.35rem 0 0 1.2rem; padding: 0; }}
     .empty-state {{
       background: var(--surface);
@@ -557,8 +717,10 @@ def generate_html_report(
   <div class="container">
     <header>
       <h1>Job-Scout — Raport Dzienny ({report_date.isoformat()})</h1>
-      <div class="subtitle">SOLID.Jobs &amp; Just Join IT &middot; Dwustopniowe filtrowanie i ocena dopasowania</div>
+      <div class="subtitle">{html.escape(subtitle_portals)} &middot; Dwustopniowe filtrowanie i ocena dopasowania</div>
     </header>
+
+    {source_health_section}
 
     <section class="metrics-grid">
       <div class="metric-box"><div class="metric-val">{metrics.fetched}</div><div class="metric-lbl">Pobrane oferty</div></div>
@@ -605,6 +767,13 @@ def generate_html_report(
           </select>
         </div>
         <div class="control-group">
+          <label for="filter-source">Portal</label>
+          <select id="filter-source">
+            <option value="all">Wszystkie</option>
+            {source_options_html}
+          </select>
+        </div>
+        <div class="control-group">
           <label for="sort-by">Sortowanie</label>
           <select id="sort-by">
             <option value="score_desc">Poziom dopasowania (najwyższy)</option>
@@ -639,6 +808,7 @@ def generate_html_report(
       const scoreEl = document.getElementById("filter-score");
       const wpEl = document.getElementById("filter-workplace");
       const cityEl = document.getElementById("filter-city");
+      const sourceEl = document.getElementById("filter-source");
       const sortEl = document.getElementById("sort-by");
       const resetBtn = document.getElementById("reset-filters");
       const listEl = document.getElementById("offers-list");
@@ -665,6 +835,7 @@ def generate_html_report(
         const scoreVal = scoreEl.value;
         const wpVal = wpEl.value;
         const cityVal = cityEl.value;
+        const sourceVal = sourceEl ? sourceEl.value : "all";
         const sortVal = sortEl.value;
 
         const sorted = cards.slice().sort((a, b) => {{
@@ -686,11 +857,13 @@ def generate_html_report(
         for (const card of sorted) {{
           const score = Number(card.dataset.score || 0);
           const wp = card.dataset.workplace || "";
+          const src = card.dataset.source || "";
           const cities = (card.dataset.cities || "").split("|").filter(Boolean);
           const show =
             matchesScore(score, scoreVal) &&
             (wpVal === "all" || wp === wpVal) &&
-            (cityVal === "all" || cities.includes(cityVal));
+            (cityVal === "all" || cities.includes(cityVal)) &&
+            (sourceVal === "all" || src === sourceVal);
           card.classList.toggle("is-hidden", !show);
           if (show) visible += 1;
           listEl.appendChild(card);
@@ -704,7 +877,7 @@ def generate_html_report(
         }}
       }}
 
-      [scoreEl, wpEl, cityEl, sortEl].forEach((el) => {{
+      [scoreEl, wpEl, cityEl, sourceEl, sortEl].forEach((el) => {{
         if (el) el.addEventListener("change", applyFiltersAndSort);
       }});
       if (resetBtn) {{
@@ -712,6 +885,7 @@ def generate_html_report(
           scoreEl.value = "all";
           wpEl.value = "all";
           cityEl.value = "all";
+          if (sourceEl) sourceEl.value = "all";
           sortEl.value = "score_desc";
           applyFiltersAndSort();
         }});

@@ -52,6 +52,43 @@ allowed_cities:
 min_salary_pln: null # e.g. 9000
 
 # ------------------------------------------------------------------------------
+# Portal Sources Configuration (optional — all sources enabled by default)
+# ------------------------------------------------------------------------------
+# Override per-portal behavior without breaking existing profile.yaml files.
+# Supported keys: solid.jobs, justjoin.it, nofluffjobs, bulldogjob, theprotocol, pracuj.pl
+# sources:
+#   solid.jobs:
+#     enabled: true
+#     max_pages: 5
+#     request_delay: 0.3
+#     timeout: 90
+#   justjoin.it:
+#     enabled: true
+#     max_pages: 20
+#     request_delay: 0.85
+#     timeout: 180
+#   nofluffjobs:
+#     enabled: true
+#     max_pages: 5
+#     request_delay: 1.0
+#     timeout: 180
+#   bulldogjob:
+#     enabled: true
+#     max_pages: 5
+#     request_delay: 0.8
+#     timeout: 180
+#   theprotocol:
+#     enabled: true
+#     max_pages: 5
+#     request_delay: 1.0
+#     timeout: 180
+#   pracuj.pl:
+#     enabled: true
+#     max_pages: 5
+#     request_delay: 1.0
+#     timeout: 180
+
+# ------------------------------------------------------------------------------
 # Stage 2: Cloud LLM Semantic Evaluation (src/job_scout/evaluator.py)
 # ------------------------------------------------------------------------------
 

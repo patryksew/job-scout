@@ -1,7 +1,7 @@
 [project]
 name = "job-scout"
 version = "0.1.0"
-description = "Automated IT job aggregator, deterministic & LLM evaluator, and reporter for SOLID.Jobs and Just Join IT"
+description = "Automated IT job aggregator, deterministic & LLM evaluator, and reporter for SOLID.Jobs, Just Join IT, No Fluff Jobs, Bulldogjob, the:protocol, and Pracuj.pl IT"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [

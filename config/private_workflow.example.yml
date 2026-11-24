@@ -25,6 +25,11 @@ on:
         required: false
         default: ''
         type: string
+      source:
+        description: 'Optional single source or comma-separated portals to scan'
+        required: false
+        default: ''
+        type: string
 
 permissions:
   contents: write
@@ -36,4 +41,5 @@ jobs:
     with:
       dry_run: ${{ inputs.dry_run || false }}
       limit: ${{ inputs.limit || '' }}
+      source: ${{ inputs.source || '' }}
     secrets: inherit

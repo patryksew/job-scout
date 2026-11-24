@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import random
 from typing import TYPE_CHECKING, Any
 
 import httpx
@@ -12,6 +11,7 @@ from job_scout.models import JobOffer, SkillItem, WorkplaceType
 from job_scout.scrapers.base import BaseScraper, strip_html
 
 if TYPE_CHECKING:
+    from job_scout.config import ProfileConfig
     from job_scout.database import DatabaseManager
     from job_scout.filter import Stage1Filter
 
@@ -145,16 +145,26 @@ class JustJoinScraper(BaseScraper):
     """Fetches offers from Just Join IT with lightweight Stage 1 metadata pre-filtering."""
 
     source_name = "justjoin.it"
+    aliases = ("justjoin", "jjit", "justjoin_it")
+    default_max_pages = 20
+    default_request_delay = 0.85
+    default_timeout = 180.0
 
     def __init__(
         self,
         client: httpx.AsyncClient | None = None,
         timeout: float = 20.0,
         max_retries: int = 3,
+        request_delay: float | None = None,
+        max_pages: int | None = None,
     ) -> None:
-        super().__init__(client=client, timeout=timeout, max_retries=max_retries)
-        self.last_total_fetched: int = 0
-        self.last_duplicates_skipped: int = 0
+        super().__init__(
+            client=client,
+            timeout=timeout,
+            max_retries=max_retries,
+            request_delay=request_delay,
+            max_pages=max_pages,
+        )
 
     def normalize_offer(self, raw: dict[str, Any]) -> JobOffer | None:
         """Convert a Just Join IT list or detail JSON object into a unified JobOffer."""
@@ -312,9 +322,14 @@ class JustJoinScraper(BaseScraper):
         db: DatabaseManager | None = None,
         seen_fingerprints: set[str] | None = None,
         max_detail_fetches: int | None = None,
+        *,
+        profile: ProfileConfig | None = None,
+        max_pages: int | None = None,
     ) -> list[JobOffer]:
         """Fetch list items, pre-filter metadata, and politely fetch details for survivors."""
-        raw_items, base_list_url = await self._fetch_list_payload()
+        del profile
+        pages_limit = self.max_pages if max_pages is None else max_pages
+        raw_items, base_list_url = await self._fetch_list_payload(max_pages=pages_limit)
         self.last_total_fetched = 0
         self.last_duplicates_skipped = 0
         results: list[JobOffer] = []
@@ -347,12 +362,12 @@ class JustJoinScraper(BaseScraper):
 
         if survivors_to_fetch:
             sem = asyncio.Semaphore(5)
-            use_jitter = len(survivors_to_fetch) > 1
+            use_jitter = len(survivors_to_fetch) > 1 and self.request_delay > 0
 
             async def _enrich(raw_item: dict[str, Any], base_offer: JobOffer) -> JobOffer:
                 async with sem:
                     if use_jitter:
-                        await asyncio.sleep(random.uniform(0.5, 1.2))
+                        await self.polite_sleep(min_factor=0.6, max_factor=1.4)
                     detail_raw = await self._fetch_detail(base_offer.external_id, base_list_url)
                     if detail_raw is not None:
                         enriched = self.normalize_offer({**raw_item, **detail_raw})

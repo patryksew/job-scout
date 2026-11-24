@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head><meta charset="utf-8" /><title>Bulldogjob Sample</title></head>
+<body>
+<script id="__NEXT_DATA__" type="application/json">{
+  "props": {
+    "pageProps": {
+      "country": "PL",
+      "slugState": {
+        "page": 1,
+        "perPage": 50,
+        "filters": {
+          "city": [
+            {"value": "Warszawa", "label": "Warszawa"},
+            {"value": "Remote", "label": "Remote"}
+          ],
+          "experienceLevel": ["junior", "medium"]
+        }
+      },
+      "totalCount": 3,
+      "jobs": [
+        {
+          "__typename": "Job",
+          "id": "100001-python-ai-engineer-warszawa-acme-tech",
+          "company": {
+            "__typename": "Company",
+            "name": "Acme Tech"
+          },
+          "denominatedSalaryLong": {
+            "__typename": "Salary",
+            "money": "12 000 - 17 000",
+            "currency": "PLN",
+            "hidden": false
+          },
+          "environment": {
+            "__typename": "Environment",
+            "remotePossible": 60
+          },
+          "city": "Warszawa",
+          "experienceLevel": "medium",
+          "employmentType": "full_time",
+          "position": "Python & AI Engineer",
+          "remote": false,
+          "showSalary": true,
+          "technologyTags": ["Python", "FastAPI", "PostgreSQL", "Docker"],
+          "contractB2b": true,
+          "contractEmployment": true,
+          "contractOther": false,
+          "locale": "pl"
+        },
+        {
+          "__typename": "Job",
+          "id": "100002-remote-go-backend-developer-cloudware",
+          "company": {
+            "__typename": "Company",
+            "name": "CloudWare"
+          },
+          "denominatedSalaryLong": {
+            "__typename": "Salary",
+            "money": "4 000 - 5 000",
+            "currency": "EUR",
+            "hidden": false
+          },
+          "environment": {
+            "__typename": "Environment",
+            "remotePossible": 100
+          },
+          "city": "Remote, Warsaw",
+          "experienceLevel": "junior",
+          "employmentType": "full_time",
+          "position": "Junior/Mid Go Backend Developer",
+          "remote": true,
+          "showSalary": true,
+          "technologyTags": ["Go", "PostgreSQL", "Docker", "Linux"],
+          "contractB2b": true,
+          "contractEmployment": false,
+          "contractOther": false,
+          "locale": "en"
+        },
+        {
+          "__typename": "Job",
+          "id": "100003-php-developer-krakow-oldshop",
+          "company": {
+            "__typename": "Company",
+            "name": "OldShop"
+          },
+          "denominatedSalaryLong": {
+            "__typename": "Salary",
+            "money": null,
+            "currency": null,
+            "hidden": false
+          },
+          "environment": {
+            "__typename": "Environment",
+            "remotePossible": 0
+          },
+          "city": "Krakow",
+          "experienceLevel": "medium",
+          "employmentType": "full_time",
+          "position": "PHP Developer",
+          "remote": false,
+          "showSalary": false,
+          "technologyTags": ["PHP", "Symfony"],
+          "contractB2b": false,
+          "contractEmployment": true,
+          "contractOther": false,
+          "locale": "pl"
+        }
+      ]
+    }
+  }
+}</script>
+</body>
+</html>

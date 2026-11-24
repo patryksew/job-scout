@@ -13,6 +13,11 @@ on:
         required: false
         default: ''
         type: string
+      source:
+        description: 'Optional single source or comma-separated portals to scan (e.g. nofluffjobs)'
+        required: false
+        default: ''
+        type: string
       code_repository:
         description: 'Public job-scout source repository (owner/repo)'
         required: false
@@ -35,6 +40,11 @@ on:
         required: false
         default: ''
         type: string
+      source:
+        description: 'Optional single source or comma-separated portals to scan (e.g. nofluffjobs)'
+        required: false
+        default: ''
+        type: string
 
 permissions:
   contents: write
@@ -42,6 +52,7 @@ permissions:
 jobs:
   scan:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - name: Checkout calling repository
         uses: actions/checkout@v4
@@ -91,6 +102,9 @@ jobs:
           fi
           if [ -n "${{ inputs.limit }}" ]; then
             ARGS="$ARGS --limit ${{ inputs.limit }}"
+          fi
+          if [ -n "${{ inputs.source }}" ]; then
+            ARGS="$ARGS --source ${{ inputs.source }}"
           fi
 
           $JOB_SCOUT_BIN run $ARGS

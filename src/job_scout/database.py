@@ -9,7 +9,14 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from job_scout.models import EvaluatedOffer, JobEvaluation, JobOffer, RejectionRecord, SkillItem
+from job_scout.models import (
+    EvaluatedOffer,
+    JobEvaluation,
+    JobOffer,
+    RejectionRecord,
+    SkillItem,
+    compute_normalized_fingerprint,
+)
 
 
 class DatabaseManager:
@@ -20,6 +27,8 @@ class DatabaseManager:
         self.rejected_log_path = rejected_log_path
         self.dry_run = dry_run
         self._conn = self._connect()
+        self._has_normalized_fp_col: bool = False
+        self._ro_recent_normalized_fps: set[str] | None = None
         self._ensure_schema()
 
     def _connect(self) -> sqlite3.Connection:
@@ -34,8 +43,18 @@ class DatabaseManager:
         conn.row_factory = sqlite3.Row
         return conn
 
+    def _inspect_columns(self) -> set[str]:
+        try:
+            return {
+                row["name"] for row in self._conn.execute("PRAGMA table_info(offers)").fetchall()
+            }
+        except sqlite3.OperationalError:
+            return set()
+
     def _ensure_schema(self) -> None:
         if self.dry_run and self.db_path.exists():
+            cols = self._inspect_columns()
+            self._has_normalized_fp_col = "normalized_fingerprint" in cols
             return
         self._conn.executescript(
             """
@@ -44,6 +63,7 @@ class DatabaseManager:
                 source TEXT NOT NULL,
                 external_id TEXT NOT NULL,
                 fingerprint TEXT NOT NULL,
+                normalized_fingerprint TEXT,
                 title TEXT NOT NULL,
                 company TEXT NOT NULL,
                 url TEXT NOT NULL,
@@ -66,12 +86,50 @@ class DatabaseManager:
             CREATE INDEX IF NOT EXISTS idx_offers_status ON offers(status);
             """
         )
-        cols = {
-            row["name"] for row in self._conn.execute("PRAGMA table_info(offers)").fetchall()
-        }
+        cols = self._inspect_columns()
         if "published_at" not in cols:
             self._conn.execute("ALTER TABLE offers ADD COLUMN published_at TEXT")
+        if "normalized_fingerprint" not in cols:
+            self._conn.execute("ALTER TABLE offers ADD COLUMN normalized_fingerprint TEXT")
+
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_offers_normalized_fingerprint "
+            "ON offers(normalized_fingerprint)"
+        )
+
+        # Backfill normalized_fingerprint safely for pre-existing records
+        rows_to_backfill = self._conn.execute(
+            "SELECT id, company, title FROM offers WHERE normalized_fingerprint IS NULL"
+        ).fetchall()
+        if rows_to_backfill:
+            self._conn.executemany(
+                "UPDATE offers SET normalized_fingerprint = ? WHERE id = ?",
+                [
+                    (compute_normalized_fingerprint(row["company"], row["title"]), row["id"])
+                    for row in rows_to_backfill
+                ],
+            )
+
         self._conn.commit()
+        self._has_normalized_fp_col = True
+
+    def _get_ro_recent_normalized_fps(self) -> set[str]:
+        """Cache normalized fingerprints for the last 30 days on unmigrated read-only DBs."""
+        if self._ro_recent_normalized_fps is None:
+            fps: set[str] = set()
+            try:
+                rows = self._conn.execute(
+                    """
+                    SELECT company, title FROM offers
+                    WHERE created_at >= datetime('now', '-30 days')
+                    """
+                ).fetchall()
+                for row in rows:
+                    fps.add(compute_normalized_fingerprint(row["company"], row["title"]))
+            except sqlite3.OperationalError:
+                pass
+            self._ro_recent_normalized_fps = fps
+        return self._ro_recent_normalized_fps
 
     def close(self) -> None:
         """Close the SQLite connection."""
@@ -82,7 +140,7 @@ class DatabaseManager:
         offer: JobOffer,
         seen_fingerprints: set[str] | None = None,
     ) -> tuple[bool, str | None]:
-        """Check whether an offer was already seen by (source, external_id) or 30-day fingerprint."""
+        """Check whether an offer was already seen by (source, external_id) or 30-day normalized fingerprint."""
         try:
             row = self._conn.execute(
                 "SELECT 1 FROM offers WHERE source = ? AND external_id = ? LIMIT 1",
@@ -91,21 +149,39 @@ class DatabaseManager:
             if row is not None:
                 return True, "already_seen_source_id"
 
-            fp = offer.compute_fingerprint()
-            if seen_fingerprints is not None and fp in seen_fingerprints:
+            norm_fp = offer.compute_fingerprint()
+            legacy_fp = offer.compute_legacy_fingerprint()
+            if seen_fingerprints is not None and (
+                norm_fp in seen_fingerprints or legacy_fp in seen_fingerprints
+            ):
                 return True, "cross_portal_duplicate"
 
-            fp_row = self._conn.execute(
-                """
-                SELECT 1 FROM offers
-                WHERE fingerprint = ?
-                  AND created_at >= datetime('now', '-30 days')
-                LIMIT 1
-                """,
-                (fp,),
-            ).fetchone()
-            if fp_row is not None:
-                return True, "cross_portal_duplicate_30d"
+            if self._has_normalized_fp_col:
+                fp_row = self._conn.execute(
+                    """
+                    SELECT 1 FROM offers
+                    WHERE (normalized_fingerprint = ? OR fingerprint = ? OR fingerprint = ?)
+                      AND created_at >= datetime('now', '-30 days')
+                    LIMIT 1
+                    """,
+                    (norm_fp, norm_fp, legacy_fp),
+                ).fetchone()
+                if fp_row is not None:
+                    return True, "cross_portal_duplicate_30d"
+            else:
+                if norm_fp in self._get_ro_recent_normalized_fps():
+                    return True, "cross_portal_duplicate_30d"
+                fp_row = self._conn.execute(
+                    """
+                    SELECT 1 FROM offers
+                    WHERE (fingerprint = ? OR fingerprint = ?)
+                      AND created_at >= datetime('now', '-30 days')
+                    LIMIT 1
+                    """,
+                    (norm_fp, legacy_fp),
+                ).fetchone()
+                if fp_row is not None:
+                    return True, "cross_portal_duplicate_30d"
         except sqlite3.OperationalError:
             # Handle empty pre-schema read-only file gracefully in dry-run
             return False, None
@@ -125,16 +201,18 @@ class DatabaseManager:
             return
 
         now_sql = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        norm_fp = offer.compute_fingerprint()
         self._conn.execute(
             """
             INSERT INTO offers (
-                source, external_id, fingerprint, title, company, url,
+                source, external_id, fingerprint, normalized_fingerprint, title, company, url,
                 locations_json, workplace_type, experience_level,
                 salary_min_pln, salary_max_pln, skills_json,
                 status, match_score, rejection_reason, evaluation_json, published_at, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(source, external_id) DO UPDATE SET
                 fingerprint = excluded.fingerprint,
+                normalized_fingerprint = excluded.normalized_fingerprint,
                 title = excluded.title,
                 company = excluded.company,
                 url = excluded.url,
@@ -153,7 +231,8 @@ class DatabaseManager:
             (
                 offer.source,
                 offer.external_id,
-                offer.compute_fingerprint(),
+                norm_fp,
+                norm_fp,
                 offer.title,
                 offer.company,
                 offer.url,

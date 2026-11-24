@@ -1,0 +1,81 @@
+{
+  "id": "python-ai-backend-developer-example-corp-warszawa",
+  "postingUrl": "python-ai-backend-developer-example-corp-warszawa",
+  "defaultUrl": "python-ai-backend-developer-example-corp-warszawa",
+  "title": "Python & AI Backend Developer",
+  "posted": 1795103022506,
+  "basics": {
+    "category": "backend",
+    "seniority": ["Mid"],
+    "technology": "Python"
+  },
+  "company": {
+    "name": "Example Corp Sp. z o.o.",
+    "size": "50 - 249",
+    "url": "https://example.com"
+  },
+  "essentials": {
+    "contract": {"start": "ASAP"},
+    "originalSalary": {
+      "currency": "PLN",
+      "types": {
+        "b2b": {
+          "period": "Hour",
+          "range": [70.0, 90.0],
+          "paidHoliday": false
+        },
+        "permanent": {
+          "period": "Month",
+          "range": [12500.0, 16000.0]
+        }
+      },
+      "disclosedAt": "VISIBLE",
+      "containsSalary": "VISIBLE"
+    }
+  },
+  "requirements": {
+    "musts": [
+      {"value": "Python", "type": "main"},
+      {"value": "FastAPI", "type": "main"},
+      {"value": "PostgreSQL", "type": "main"},
+      {"value": "RAG", "type": "main"}
+    ],
+    "nices": [
+      {"value": "Docker", "type": "nice"},
+      {"value": "LangGraph", "type": "nice"}
+    ],
+    "description": "<h3>Wymagania</h3><ul><li>2+ lata doświadczenia z Pythonem i FastAPI</li><li>Praktyczna znajomość integracji LLM i baz PostgreSQL</li></ul>",
+    "languages": [
+      {"type": "MUST", "code": "pl"},
+      {"type": "MUST", "code": "en"}
+    ]
+  },
+  "details": {
+    "quote": "Budujemy nowoczesne usługi backendowe wspierane przez LLM.",
+    "description": "<h3>O projekcie</h3><p>Rozwój platformy SaaS do przetwarzania dokumentów z użyciem FastAPI, Celery i modeli językowych.</p>"
+  },
+  "specs": {
+    "dailyTasks": [
+      "Projektowanie i wdrażanie endpointów REST API w FastAPI",
+      "Budowa pipeline'ów RAG i walidacji structured outputs",
+      "Code review oraz utrzymanie testów automatycznych"
+    ]
+  },
+  "location": {
+    "places": [
+      {
+        "country": {"code": "POL", "name": "Poland"},
+        "city": "Warszawa",
+        "street": "ul. Przykładowa 10",
+        "url": "python-ai-backend-developer-example-corp-warszawa"
+      },
+      {
+        "country": {"code": "POL", "name": "Poland"},
+        "province": "masovian",
+        "provinceOnly": true
+      }
+    ],
+    "remote": 0,
+    "hybridDesc": "2 dni w tygodniu w biurze w Warszawie"
+  }
+}

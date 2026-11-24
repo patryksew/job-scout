@@ -43,8 +43,28 @@ class Settings(BaseSettings):
         return key
 
 
+class SourceConfig(BaseModel):
+    """Optional per-portal scraping configuration overrides in profile.yaml."""
+
+    enabled: bool = True
+    max_pages: int | None = Field(default=None, ge=1)
+    request_delay: float | None = Field(default=None, ge=0.0)
+    timeout: float | None = Field(default=None, gt=0.0)
+    max_detail_fetches: int | None = Field(default=None, ge=0)
+
+
+class ResolvedSourceConfig(BaseModel):
+    """Fully resolved per-portal configuration with concrete defaults applied."""
+
+    enabled: bool = True
+    max_pages: int = Field(default=5, ge=1)
+    request_delay: float = Field(default=0.8, ge=0.0)
+    timeout: float = Field(default=120.0, gt=0.0)
+    max_detail_fetches: int | None = Field(default=None, ge=0)
+
+
 class ProfileConfig(BaseModel):
-    """Candidate filtering rules, scoring threshold, and expectations."""
+    """Candidate filtering rules, scoring threshold, expectations, and source controls."""
 
     min_match_score: int = Field(default=7, ge=1, le=10)
     must_have_any_tech: list[str] = Field(default_factory=list)
@@ -54,6 +74,45 @@ class ProfileConfig(BaseModel):
     min_salary_pln: int | None = None
     preferences: dict[str, Any] = Field(default_factory=dict)
     free_text_expectations: str = ""
+    sources: dict[str, SourceConfig] = Field(default_factory=dict)
+
+    def get_source_config(
+        self,
+        source_name: str,
+        *,
+        aliases: tuple[str, ...] = (),
+        default_max_pages: int = 5,
+        default_request_delay: float = 0.8,
+        default_timeout: float = 120.0,
+    ) -> ResolvedSourceConfig:
+        """Resolve per-portal overrides from profile.yaml, falling back to scraper defaults."""
+        lookup_keys = {source_name.lower(), *(alias.lower() for alias in aliases)}
+        matched: SourceConfig | None = None
+        for key, cfg in self.sources.items():
+            if key.strip().lower() in lookup_keys:
+                matched = cfg
+                break
+
+        if matched is None:
+            return ResolvedSourceConfig(
+                enabled=True,
+                max_pages=default_max_pages,
+                request_delay=default_request_delay,
+                timeout=default_timeout,
+                max_detail_fetches=None,
+            )
+
+        return ResolvedSourceConfig(
+            enabled=matched.enabled,
+            max_pages=matched.max_pages if matched.max_pages is not None else default_max_pages,
+            request_delay=(
+                matched.request_delay
+                if matched.request_delay is not None
+                else default_request_delay
+            ),
+            timeout=matched.timeout if matched.timeout is not None else default_timeout,
+            max_detail_fetches=matched.max_detail_fetches,
+        )
 
 
 def load_profile(path: Path) -> ProfileConfig:

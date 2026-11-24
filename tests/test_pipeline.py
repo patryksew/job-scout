@@ -13,14 +13,24 @@ import httpx
 import openai
 import pytest
 
-from job_scout.cli import _unique_run_stamp, execute_report
+from job_scout.cli import _unique_run_stamp, build_parser, execute_report, execute_run
 
 from job_scout.config import ProfileConfig, Settings, load_profile
 from job_scout.database import DatabaseManager
 from job_scout.evaluator import LLMEvaluator
 from job_scout.filter import Stage1Filter
-from job_scout.models import EvaluatedOffer, JobEvaluation, JobOffer, SkillItem
+from job_scout.models import (
+    EvaluatedOffer,
+    JobEvaluation,
+    JobOffer,
+    SkillItem,
+    SourceRunStats,
+    compute_normalized_fingerprint,
+    normalize_company,
+    normalize_title,
+)
 from job_scout.reporter import RunMetrics, generate_html_report, generate_markdown_report
+from job_scout.scrapers.base import BaseScraper
 from job_scout.scrapers.justjoin import JustJoinScraper
 from job_scout.scrapers.solid_jobs import SolidJobsScraper
 
@@ -518,3 +528,309 @@ def test_timestamped_run_stamps_and_master_report_regeneration(tmp_path: Path) -
     old_html_text = html_old.read_text(encoding="utf-8")
     assert "Old Python Role" in old_html_text
     assert "Recent AI Role" not in old_html_text
+
+
+def test_normalized_fingerprint_and_legacy_db_migration(tmp_path: Path) -> None:
+    assert normalize_company("Acme Sp. z o.o.") == "acme"
+    assert normalize_company("ACME S.A.") == "acme"
+    assert normalize_company("Acme Spółka z ograniczoną odpowiedzialnością") == "acme"
+    assert normalize_title("Python Developer (Remote) - Warszawa") == "python developer"
+    assert normalize_title("Python   Developer / 100% Remote [Warsaw]") == "python developer"
+    assert compute_normalized_fingerprint("Acme Sp. z o.o.", "Python Developer - Warszawa") == (
+        compute_normalized_fingerprint("ACME S.A.", "Python Developer (Remote)")
+    )
+    # C++ and C# roles at the same company must NOT collide
+    assert compute_normalized_fingerprint("Acme", "C++ Developer") != (
+        compute_normalized_fingerprint("Acme", "C# Developer")
+    )
+
+    # Simulate pre-migration legacy SQLite DB (without normalized_fingerprint column)
+    db_path = tmp_path / "legacy.db"
+    log_path = tmp_path / "rejected_log.jsonl"
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        """
+        CREATE TABLE offers (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source TEXT NOT NULL,
+            external_id TEXT NOT NULL,
+            fingerprint TEXT NOT NULL,
+            title TEXT NOT NULL,
+            company TEXT NOT NULL,
+            url TEXT NOT NULL,
+            locations_json TEXT NOT NULL DEFAULT '[]',
+            workplace_type TEXT NOT NULL DEFAULT 'onsite',
+            experience_level TEXT,
+            salary_min_pln INTEGER,
+            salary_max_pln INTEGER,
+            skills_json TEXT NOT NULL DEFAULT '[]',
+            status TEXT NOT NULL,
+            match_score INTEGER,
+            rejection_reason TEXT,
+            evaluation_json TEXT,
+            published_at TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            UNIQUE(source, external_id)
+        );
+        INSERT INTO offers (source, external_id, fingerprint, title, company, url, status)
+        VALUES ('solid.jobs', 'leg-1', 'old-raw-hash', 'Python Developer (Warszawa)', 'TechCorp Sp. z o.o.', 'https://solid.jobs/offer/leg-1', 'shortlisted');
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    # Dry-run on unmigrated read-only DB must still catch normalized cross-portal duplicate
+    variant_offer = _sample_offer(
+        external_id="nfj-999",
+        source="nofluffjobs",
+        company="TechCorp S.A.",
+        title="Python Developer - Remote",
+    )
+    ro_db = DatabaseManager(db_path, log_path, dry_run=True)
+    try:
+        is_dup_ro, reason_ro = ro_db.is_duplicate(variant_offer)
+        assert is_dup_ro is True
+        assert reason_ro == "cross_portal_duplicate_30d"
+    finally:
+        ro_db.close()
+
+    # Normal run safely migrates schema via ALTER TABLE and backfills normalized_fingerprint
+    rw_db = DatabaseManager(db_path, log_path, dry_run=False)
+    try:
+        cols = {row["name"] for row in rw_db._conn.execute("PRAGMA table_info(offers)").fetchall()}
+        assert "normalized_fingerprint" in cols
+        row = rw_db._conn.execute(
+            "SELECT normalized_fingerprint FROM offers WHERE external_id = 'leg-1'"
+        ).fetchone()
+        assert row["normalized_fingerprint"] == variant_offer.compute_fingerprint()
+
+        is_dup_rw, reason_rw = rw_db.is_duplicate(variant_offer)
+        assert is_dup_rw is True
+        assert reason_rw == "cross_portal_duplicate_30d"
+    finally:
+        rw_db.close()
+
+
+async def test_fail_soft_error_isolation_source_flag_and_health_table(tmp_path: Path) -> None:
+    profile_path = tmp_path / "profile.yaml"
+    cv_path = tmp_path / "base_cv.md"
+    db_path = tmp_path / "jobs.db"
+    log_path = tmp_path / "rejected_log.jsonl"
+    reports_dir = tmp_path / "reports"
+
+    profile_path.write_text(
+        """
+min_match_score: 7
+must_have_any_tech: ["Python"]
+exclude_keywords: ["PHP"]
+allowed_workplace_types: ["remote", "hybrid"]
+allowed_cities: ["Warszawa"]
+sources:
+  disabled_portal:
+    enabled: false
+""",
+        encoding="utf-8",
+    )
+    cv_path.write_text("# Candidate CV\nPython Engineer", encoding="utf-8")
+
+    class FailingScraper(BaseScraper):
+        source_name = "broken.portal"
+
+        async def fetch_offers(self, **kwargs: object) -> list[JobOffer]:
+            raise httpx.ConnectTimeout("Connection timed out to broken.portal")
+
+    class WorkingScraperA(BaseScraper):
+        source_name = "portal.a"
+
+        async def fetch_offers(self, **kwargs: object) -> list[JobOffer]:
+            offers = [
+                _sample_offer(
+                    external_id="a-1",
+                    source="portal.a",
+                    company="Acme Sp. z o.o.",
+                    title="Python Engineer (Remote)",
+                )
+            ]
+            self.last_total_fetched = len(offers)
+            return offers
+
+    class WorkingScraperB(BaseScraper):
+        source_name = "portal.b"
+
+        async def fetch_offers(self, **kwargs: object) -> list[JobOffer]:
+            offers = [
+                # Cross-portal duplicate of portal.a with different legal suffix & location tag
+                _sample_offer(
+                    external_id="b-dup",
+                    source="portal.b",
+                    company="ACME S.A.",
+                    title="Python Engineer - Warszawa",
+                ),
+                # Unique offer
+                _sample_offer(
+                    external_id="b-uniq",
+                    source="portal.b",
+                    company="BetaLabs",
+                    title="Junior Python Developer",
+                ),
+            ]
+            self.last_total_fetched = len(offers)
+            return offers
+
+    class DisabledScraper(BaseScraper):
+        source_name = "disabled_portal"
+
+        async def fetch_offers(self, **kwargs: object) -> list[JobOffer]:
+            raise AssertionError("Disabled portal should not be invoked")
+
+    fake_registry = {
+        "broken.portal": FailingScraper,
+        "portal.a": WorkingScraperA,
+        "portal.b": WorkingScraperB,
+        "disabled_portal": DisabledScraper,
+    }
+
+    settings = Settings(
+        llm_api_key="",
+        profile_path=profile_path,
+        cv_path=cv_path,
+        db_path=db_path,
+        rejected_log_path=log_path,
+        reports_dir=reports_dir,
+    )
+
+    # 1. Dry-run across all sources: broken.portal fails soft, portal.a & portal.b succeed, dedup works, DB untouched
+    metrics = await execute_run(
+        dry_run=True,
+        settings=settings,
+        scraper_registry=fake_registry,
+    )
+    assert not db_path.exists()
+    assert metrics.fetched == 3
+    assert metrics.duplicates_skipped == 1
+    assert metrics.rule_rejected == 0
+
+    stats_by_src = {s.source: s for s in metrics.source_stats}
+    assert stats_by_src["broken.portal"].error is not None
+    assert "timed out" in stats_by_src["broken.portal"].error
+    assert stats_by_src["portal.a"].fetched == 1
+    assert stats_by_src["portal.a"].passed_prefilter == 1
+    assert stats_by_src["portal.b"].fetched == 2
+    assert stats_by_src["portal.b"].duplicates_skipped == 1
+    assert stats_by_src["portal.b"].passed_prefilter == 1
+    assert stats_by_src["disabled_portal"].status == "Wyłączony"
+
+    # 2. --source flag runs only the selected portal
+    single_metrics = await execute_run(
+        dry_run=True,
+        sources=["portal.b"],
+        settings=settings,
+        scraper_registry=fake_registry,
+    )
+    assert [s.source for s in single_metrics.source_stats] == ["portal.b"]
+    assert single_metrics.fetched == 2
+
+    # 3. CLI parser accepts --source and --dry-run
+    parser = build_parser()
+    parsed = parser.parse_args(["run", "--source", "solid.jobs", "--dry-run"])
+    assert parsed.dry_run is True
+    assert parsed.sources == ["solid.jobs"]
+
+    # 4. Reports render the Source Health table at the top
+    md_path = tmp_path / "health_report.md"
+    html_path = tmp_path / "health_report.html"
+    md_out = generate_markdown_report(
+        date(2026, 11, 24), metrics, [], [], [], md_path, write_step_summary=False
+    )
+    html_out = generate_html_report(date(2026, 11, 24), metrics, [], [], [], html_path)
+    assert "| Portal | Pobrane | Po pre-filtrze | Duplikaty | Ocenione LLM | Status/Błąd |" in md_out
+    assert "broken.portal" in md_out and "BŁĄD:" in md_out
+    assert md_out.index("## Kondycja źródeł") < md_out.index("## Rekomendowane oferty")
+    assert 'id="source-health-table"' in html_out
+    assert "<th>Portal</th>" in html_out
+    assert "<th>Status/Błąd</th>" in html_out
+    assert "broken.portal" in html_out
+
+
+async def test_cross_portal_dedup_prevents_duplicate_llm_calls(tmp_path: Path) -> None:
+    profile_path = tmp_path / "profile.yaml"
+    cv_path = tmp_path / "base_cv.md"
+    db_path = tmp_path / "jobs.db"
+    log_path = tmp_path / "rejected_log.jsonl"
+    reports_dir = tmp_path / "reports"
+
+    profile_path.write_text(
+        """
+min_match_score: 7
+must_have_any_tech: ["Python"]
+allowed_workplace_types: ["remote", "hybrid"]
+allowed_cities: ["Warszawa"]
+""",
+        encoding="utf-8",
+    )
+    cv_path.write_text("# CV\nPython Engineer", encoding="utf-8")
+
+    class NFJMock(BaseScraper):
+        source_name = "nofluffjobs"
+
+        async def fetch_offers(self, **kwargs: object) -> list[JobOffer]:
+            offers = [
+                _sample_offer(
+                    external_id="nfj-1",
+                    source="nofluffjobs",
+                    company="NovaTech Sp. z o.o.",
+                    title="Mid Python Engineer (Remote)",
+                )
+            ]
+            self.last_total_fetched = 1
+            return offers
+
+    class PracujMock(BaseScraper):
+        source_name = "pracuj.pl"
+
+        async def fetch_offers(self, **kwargs: object) -> list[JobOffer]:
+            offers = [
+                _sample_offer(
+                    external_id="pr-1",
+                    source="pracuj.pl",
+                    company="NOVATECH S.A.",
+                    title="Mid Python Engineer - Warszawa (k/m/x)",
+                )
+            ]
+            self.last_total_fetched = 1
+            return offers
+
+    eval_calls: list[str] = []
+
+    async def fake_eval(self: LLMEvaluator, offer: JobOffer, max_attempts: int = 3) -> JobEvaluation:
+        eval_calls.append(f"{offer.source}:{offer.external_id}")
+        return JobEvaluation(
+            match_score=8,
+            is_recommended=True,
+            one_line_pitch="Świetna oferta Python.",
+        )
+
+    settings = Settings(
+        llm_api_key="dummy-key",
+        profile_path=profile_path,
+        cv_path=cv_path,
+        db_path=db_path,
+        rejected_log_path=log_path,
+        reports_dir=reports_dir,
+    )
+
+    with patch.object(LLMEvaluator, "evaluate_offer", new=fake_eval):
+        metrics = await execute_run(
+            dry_run=False,
+            settings=settings,
+            scraper_registry={"nofluffjobs": NFJMock, "pracuj.pl": PracujMock},
+        )
+
+    # Duplicate from pracuj.pl must be skipped BEFORE LLM invocation
+    assert eval_calls == ["nofluffjobs:nfj-1"]
+    assert metrics.shortlisted == 1
+    assert metrics.duplicates_skipped == 1
+    by_src = {s.source: s for s in metrics.source_stats}
+    assert by_src["nofluffjobs"].llm_evaluated == 1
+    assert by_src["pracuj.pl"].llm_evaluated == 0
+    assert by_src["pracuj.pl"].duplicates_skipped == 1

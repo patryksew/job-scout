@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from job_scout.models import JobOffer, SkillItem, WorkplaceType
 from job_scout.scrapers.base import BaseScraper, strip_html
+
+if TYPE_CHECKING:
+    from job_scout.config import ProfileConfig
+    from job_scout.database import DatabaseManager
+    from job_scout.filter import Stage1Filter
 
 SOLID_JOBS_API_URL = "https://solid.jobs/public-api/offers/IT"
 DEFAULT_CAMPAIGN = "job-scout"
@@ -131,6 +136,10 @@ class SolidJobsScraper(BaseScraper):
     """Fetches and normalizes IT job offers from SOLID.Jobs public REST API."""
 
     source_name = "solid.jobs"
+    aliases = ("solid", "solid_jobs", "solidjobs")
+    default_max_pages = 5
+    default_request_delay = 0.3
+    default_timeout = 90.0
 
     def normalize_offer(self, raw: dict[str, Any]) -> JobOffer | None:
         """Convert a raw SOLID.Jobs API item into a unified JobOffer."""
@@ -198,12 +207,27 @@ class SolidJobsScraper(BaseScraper):
             published_at=published_at,
         )
 
-    async def fetch_offers(self, max_pages: int = 5) -> list[JobOffer]:
+    async def fetch_offers(
+        self,
+        max_pages: int | None = None,
+        *,
+        profile: ProfileConfig | None = None,
+        stage1_filter: Stage1Filter | None = None,
+        db: DatabaseManager | None = None,
+        seen_fingerprints: set[str] | None = None,
+        max_detail_fetches: int | None = None,
+    ) -> list[JobOffer]:
         """Query SOLID.Jobs IT offers endpoint, supporting both list and paginated objects."""
+        del profile, stage1_filter, db, seen_fingerprints, max_detail_fetches
+        pages_limit = self.max_pages if max_pages is None else max_pages
         offers: list[JobOffer] = []
         seen_ids: set[str] = set()
+        self.last_total_fetched = 0
+        self.last_duplicates_skipped = 0
 
-        for page_idx in range(max_pages):
+        for page_idx in range(pages_limit):
+            if page_idx > 0:
+                await self.polite_sleep()
             params: dict[str, Any] = {"campaign": DEFAULT_CAMPAIGN}
             if page_idx > 0:
                 params["pageIndex"] = page_idx
@@ -241,4 +265,5 @@ class SolidJobsScraper(BaseScraper):
             if page_idx + 1 >= total_pages or new_on_page == 0:
                 break
 
+        self.last_total_fetched = len(offers)
         return offers

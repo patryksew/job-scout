@@ -1,9 +1,11 @@
-"""CLI entrypoint for job-scout (run, dry-run, stats)."""
+"""CLI entrypoint for job-scout (run, dry-run, stats, report)."""
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import logging
+from collections import OrderedDict
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Sequence
@@ -14,7 +16,13 @@ from job_scout.config import Settings, load_cv, load_profile
 from job_scout.database import DatabaseManager
 from job_scout.evaluator import LLMEvaluator
 from job_scout.filter import Stage1Filter
-from job_scout.models import EvaluatedOffer, JobEvaluation, JobOffer, RejectionRecord
+from job_scout.models import (
+    EvaluatedOffer,
+    JobEvaluation,
+    JobOffer,
+    RejectionRecord,
+    SourceRunStats,
+)
 from job_scout.reporter import (
     RunMetrics,
     generate_html_report,
@@ -22,8 +30,10 @@ from job_scout.reporter import (
     print_run_summary,
     print_stats,
 )
-from job_scout.scrapers.justjoin import JustJoinScraper
-from job_scout.scrapers.solid_jobs import SolidJobsScraper
+from job_scout.scrapers.base import BaseScraper
+from job_scout.scrapers.registry import get_scraper_registry, list_sources, resolve_source_name
+
+logger = logging.getLogger(__name__)
 
 
 def _unique_run_stamp(reports_dir: Path, now: datetime) -> str:
@@ -53,6 +63,39 @@ def _unique_run_stamp(reports_dir: Path, now: datetime) -> str:
         idx += 1
 
 
+def _aggregate_master_source_stats(
+    shortlisted: list[EvaluatedOffer],
+    llm_rej: list[RejectionRecord],
+    rule_rej: list[RejectionRecord],
+) -> list[SourceRunStats]:
+    """Build per-portal stats from stored daily shortlisted and rejection records."""
+    by_source: OrderedDict[str, SourceRunStats] = OrderedDict()
+
+    def _get(src: str) -> SourceRunStats:
+        if src not in by_source:
+            by_source[src] = SourceRunStats(source=src, status="OK")
+        return by_source[src]
+
+    for item in shortlisted:
+        st = _get(item.offer.source)
+        st.fetched += 1
+        st.passed_prefilter += 1
+        st.llm_evaluated += 1
+        st.shortlisted += 1
+    for rec in llm_rej:
+        st = _get(rec.source)
+        st.fetched += 1
+        st.passed_prefilter += 1
+        st.llm_evaluated += 1
+        st.llm_rejected += 1
+    for rec in rule_rej:
+        st = _get(rec.source)
+        st.fetched += 1
+        st.rule_rejected += 1
+
+    return list(by_source.values())
+
+
 def write_daily_master_reports(
     db: DatabaseManager,
     reports_dir: Path,
@@ -69,12 +112,14 @@ def write_daily_master_reports(
 
     llm_rej = [r for r in records if r.stage == "llm"]
     rule_rej = [r for r in records if r.stage == "rule"]
+    source_stats = _aggregate_master_source_stats(shortlisted, llm_rej, rule_rej)
     metrics = RunMetrics(
         fetched=len(shortlisted) + len(llm_rej) + len(rule_rej),
         duplicates_skipped=0,
         rule_rejected=len(rule_rej),
         llm_rejected=len(llm_rej),
         shortlisted=len(shortlisted),
+        source_stats=source_stats,
     )
     master_md = reports_dir / f"{date_str}_master.md"
     master_html = reports_dir / f"{date_str}_master.html"
@@ -98,21 +143,50 @@ def write_daily_master_reports(
     return master_md, master_html, len(shortlisted)
 
 
+def _parse_requested_sources(
+    raw_sources: Sequence[str] | None,
+    registry: dict[str, type[BaseScraper]],
+) -> list[str] | None:
+    """Resolve and deduplicate CLI --source flags (supports repeated or comma-separated values)."""
+    if not raw_sources:
+        return None
+    resolved: list[str] = []
+    seen: set[str] = set()
+    for raw in raw_sources:
+        for part in raw.split(","):
+            token = part.strip()
+            if not token:
+                continue
+            canonical = resolve_source_name(token, registry=registry)
+            if canonical not in seen:
+                seen.add(canonical)
+                resolved.append(canonical)
+    return resolved or None
+
+
 async def execute_run(
     *,
     dry_run: bool = False,
     limit: int | None = None,
+    sources: Sequence[str] | None = None,
     settings: Settings | None = None,
     console: Console | None = None,
+    scraper_registry: dict[str, type[BaseScraper]] | None = None,
 ) -> RunMetrics:
     """Run the full job-scout pipeline: fetch -> dedup -> filter -> evaluate -> report."""
     cfg = settings or Settings()
     out = console or Console()
     profile = load_profile(cfg.profile_path)
-    base_cv = load_cv(cfg.cv_path)
-
+    base_cv = ""
     if not dry_run:
+        base_cv = load_cv(cfg.cv_path)
         cfg.require_api_key()
+    elif cfg.cv_path.exists():
+        base_cv = load_cv(cfg.cv_path)
+
+    registry = scraper_registry if scraper_registry is not None else get_scraper_registry()
+    requested_sources = _parse_requested_sources(sources, registry)
+    target_source_names = requested_sources if requested_sources is not None else list(registry.keys())
 
     db = DatabaseManager(cfg.db_path, cfg.rejected_log_path, dry_run=dry_run)
     stage1 = Stage1Filter(profile)
@@ -120,63 +194,109 @@ async def execute_run(
 
     seen_fingerprints: set[str] = set()
     survivors: list[JobOffer] = []
+    sample_offers: list[JobOffer] = []
     rule_rejected_records: list[RejectionRecord] = []
     llm_rejected_records: list[RejectionRecord] = []
     shortlisted: list[EvaluatedOffer] = []
+    source_stats_map: OrderedDict[str, SourceRunStats] = OrderedDict()
 
     try:
-        # 1. Fetch SOLID.Jobs
-        async with SolidJobsScraper() as solid_scraper:
-            try:
-                solid_offers = await solid_scraper.fetch_offers()
-            except Exception as exc:
-                out.print(f"[yellow]Warning: SOLID.Jobs fetch failed: {exc}[/yellow]")
-                solid_offers = []
+        # 1. Fail-soft fetch across enabled/selected sources
+        for source_name in target_source_names:
+            scraper_cls = registry[source_name]
+            src_cfg = profile.get_source_config(
+                source_name,
+                aliases=getattr(scraper_cls, "aliases", ()),
+                default_max_pages=scraper_cls.default_max_pages,
+                default_request_delay=scraper_cls.default_request_delay,
+                default_timeout=scraper_cls.default_timeout,
+            )
+            stat = SourceRunStats(source=source_name)
+            source_stats_map[source_name] = stat
 
-        metrics.fetched += len(solid_offers)
-        for offer in solid_offers:
-            is_dup, _ = db.is_duplicate(offer, seen_fingerprints=seen_fingerprints)
-            if is_dup:
-                metrics.duplicates_skipped += 1
+            if requested_sources is None and not src_cfg.enabled:
+                stat.status = "Wyłączony"
                 continue
-            seen_fingerprints.add(offer.compute_fingerprint())
 
-            reason = stage1.filter_offer(offer)
-            if reason is not None:
-                metrics.rule_rejected += 1
-                rule_rejected_records.append(db.record_rule_rejection(offer, reason))
-            else:
-                survivors.append(offer)
+            max_details = src_cfg.max_detail_fetches
+            if limit is not None:
+                budget = max(0, limit - len(survivors)) * 5
+                max_details = budget if max_details is None else min(max_details, budget)
 
-        # 2. Fetch Just Join IT with lightweight pre-filtering before detail fetches
-        async with JustJoinScraper() as jj_scraper:
+            fetched_offers: list[JobOffer] = []
             try:
-                max_details = max(0, limit - len(survivors)) * 5 if limit is not None else None
-                jj_offers = await jj_scraper.fetch_offers(
-                    stage1_filter=stage1,
-                    db=db,
-                    seen_fingerprints=seen_fingerprints,
-                    max_detail_fetches=max_details,
-                )
-                metrics.fetched += jj_scraper.last_total_fetched
-                metrics.duplicates_skipped += jj_scraper.last_duplicates_skipped
-            except Exception as exc:
-                out.print(f"[yellow]Warning: Just Join IT fetch failed: {exc}[/yellow]")
-                jj_offers = []
-
-        for offer in jj_offers:
-            is_dup, _ = db.is_duplicate(offer, seen_fingerprints=seen_fingerprints)
-            if is_dup:
-                metrics.duplicates_skipped += 1
+                async with scraper_cls(
+                    request_delay=src_cfg.request_delay,
+                    max_pages=src_cfg.max_pages,
+                ) as scraper:
+                    fetched_offers = await asyncio.wait_for(
+                        scraper.fetch_offers(
+                            profile=profile,
+                            stage1_filter=stage1,
+                            db=db,
+                            seen_fingerprints=seen_fingerprints,
+                            max_pages=src_cfg.max_pages,
+                            max_detail_fetches=max_details,
+                        ),
+                        timeout=src_cfg.timeout,
+                    )
+                    stat.fetched = max(scraper.last_total_fetched, len(fetched_offers))
+                    stat.duplicates_skipped += scraper.last_duplicates_skipped
+                    metrics.fetched += stat.fetched
+                    metrics.duplicates_skipped += scraper.last_duplicates_skipped
+            except asyncio.TimeoutError:
+                err_msg = f"Timeout po {src_cfg.timeout:.0f}s"
+                stat.status = "BŁĄD"
+                stat.error = err_msg
+                logger.error("Scraper '%s' timed out: %s", source_name, err_msg)
+                out.print(f"[yellow]Warning: {source_name} fetch failed: {err_msg}[/yellow]")
                 continue
-            seen_fingerprints.add(offer.compute_fingerprint())
+            except Exception as exc:
+                err_msg = str(exc).strip() or type(exc).__name__
+                if len(err_msg) > 160:
+                    err_msg = err_msg[:157] + "..."
+                stat.status = "BŁĄD"
+                stat.error = err_msg
+                logger.exception("Scraper '%s' failed: %s", source_name, err_msg)
+                out.print(f"[yellow]Warning: {source_name} fetch failed: {err_msg}[/yellow]")
+                continue
 
-            reason = offer.metadata_rejected_reason or stage1.filter_offer(offer)
-            if reason is not None:
-                metrics.rule_rejected += 1
-                rule_rejected_records.append(db.record_rule_rejection(offer, reason))
-            else:
-                survivors.append(offer)
+            for offer in fetched_offers:
+                if len(sample_offers) < 10:
+                    sample_offers.append(offer)
+
+                is_dup, _ = db.is_duplicate(offer, seen_fingerprints=seen_fingerprints)
+                if is_dup:
+                    stat.duplicates_skipped += 1
+                    metrics.duplicates_skipped += 1
+                    continue
+                seen_fingerprints.add(offer.compute_fingerprint())
+
+                reason = offer.metadata_rejected_reason or stage1.filter_offer(offer)
+                if reason is not None:
+                    stat.rule_rejected += 1
+                    metrics.rule_rejected += 1
+                    rule_rejected_records.append(db.record_rule_rejection(offer, reason))
+                else:
+                    stat.passed_prefilter += 1
+                    survivors.append(offer)
+
+        # 2. Explicit pre-LLM cross-portal deduplication guard
+        deduped_survivors: list[JobOffer] = []
+        llm_stage_fps: set[str] = set()
+        for offer in survivors:
+            fp = offer.compute_fingerprint()
+            if fp in llm_stage_fps:
+                metrics.duplicates_skipped += 1
+                if offer.source in source_stats_map:
+                    source_stats_map[offer.source].duplicates_skipped += 1
+                    source_stats_map[offer.source].passed_prefilter = max(
+                        0, source_stats_map[offer.source].passed_prefilter - 1
+                    )
+                continue
+            llm_stage_fps.add(fp)
+            deduped_survivors.append(offer)
+        survivors = deduped_survivors
 
         # 3. Stage 2 LLM evaluation (concurrent, skipped in --dry-run)
         if not dry_run and survivors:
@@ -201,13 +321,21 @@ async def execute_run(
                         f"[yellow]Warning: LLM evaluation failed for '{offer.title}' ({offer.company}): {err}[/yellow]"
                     )
                     continue
+                if offer.source in source_stats_map:
+                    source_stats_map[offer.source].llm_evaluated += 1
                 rej_record = db.record_llm_result(offer, evaluation)
                 if rej_record is not None:
                     metrics.llm_rejected += 1
+                    if offer.source in source_stats_map:
+                        source_stats_map[offer.source].llm_rejected += 1
                     llm_rejected_records.append(rej_record)
                 else:
                     metrics.shortlisted += 1
+                    if offer.source in source_stats_map:
+                        source_stats_map[offer.source].shortlisted += 1
                     shortlisted.append(EvaluatedOffer(offer=offer, evaluation=evaluation))
+
+        metrics.source_stats = list(source_stats_map.values())
 
         # 4. Reporting
         print_run_summary(
@@ -215,6 +343,7 @@ async def execute_run(
             metrics,
             shortlisted,
             survivors_preview=survivors if dry_run else None,
+            sample_offers_preview=sample_offers if dry_run else None,
         )
 
         if not dry_run:
@@ -306,13 +435,23 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Fetch and run Stage 1 filter without calling the LLM or mutating DB",
+        help="Fetch, pre-filter, and deduplicate without writing to SQLite or calling the LLM",
     )
     run_parser.add_argument(
         "--limit",
         type=int,
         default=None,
         help="Maximum number of Stage 1 survivors to evaluate with the LLM",
+    )
+    run_parser.add_argument(
+        "--source",
+        action="append",
+        dest="sources",
+        default=None,
+        help=(
+            "Run only selected portal scraper(s); repeatable or comma-separated. "
+            f"Available: {', '.join(list_sources())}"
+        ),
     )
 
     subparsers.add_parser(
@@ -340,7 +479,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     console = Console()
 
     if args.command == "run":
-        asyncio.run(execute_run(dry_run=args.dry_run, limit=args.limit, console=console))
+        try:
+            asyncio.run(
+                execute_run(
+                    dry_run=args.dry_run,
+                    limit=args.limit,
+                    sources=args.sources,
+                    console=console,
+                )
+            )
+        except ValueError as exc:
+            console.print(f"[red]Error: {exc}[/red]")
+            return 2
         return 0
     if args.command == "stats":
         execute_stats(console=console)

@@ -1,0 +1,162 @@
+{
+  "criteriaSearch": {
+    "category": ["backend", "artificial-intelligence", "data"],
+    "city": ["warszawa", "remote"],
+    "seniority": ["trainee", "junior", "mid"]
+  },
+  "totalCount": 3,
+  "totalPages": 1,
+  "postings": [
+    {
+      "id": "python-ai-backend-developer-example-corp-Warszawa",
+      "url": "python-ai-backend-developer-example-corp-warszawa",
+      "title": "Python & AI Backend Developer",
+      "name": "Example Corp Sp. z o.o.",
+      "category": "backend",
+      "technology": "Python",
+      "seniority": ["Mid"],
+      "fullyRemote": false,
+      "location": {
+        "places": [
+          {
+            "country": {"code": "POL", "name": "Poland"},
+            "city": "Warszawa",
+            "street": "ul. Przykładowa 10",
+            "postalCode": "00-001",
+            "url": "python-ai-backend-developer-example-corp-warszawa"
+          },
+          {
+            "country": {"code": "POL", "name": "Poland"},
+            "province": "masovian",
+            "provinceOnly": true
+          }
+        ],
+        "fullyRemote": false,
+        "hybridDesc": "Hybrid: 2 days/week in Warsaw office",
+        "type": "hybrid"
+      },
+      "salary": {
+        "from": 11760.0,
+        "to": 15120.0,
+        "type": "b2b",
+        "currency": "PLN",
+        "period": "Month",
+        "disclosedAt": "VISIBLE",
+        "containsSalary": "VISIBLE"
+      },
+      "tiles": {
+        "values": [
+          {"value": "backend", "type": "category"},
+          {"value": "Python", "type": "requirement"},
+          {"value": "FastAPI", "type": "requirement"},
+          {"value": "PostgreSQL", "type": "requirement"}
+        ]
+      },
+      "reference": "REF-PY-001",
+      "posted": 1795103022506,
+      "renewed": 1795535022506
+    },
+    {
+      "id": "python-ai-backend-developer-example-corp-Remote",
+      "url": "python-ai-backend-developer-example-corp-remote",
+      "title": "Python & AI Backend Developer",
+      "name": "Example Corp Sp. z o.o.",
+      "category": "backend",
+      "technology": "Python",
+      "seniority": ["Mid"],
+      "fullyRemote": false,
+      "location": {
+        "places": [
+          {"city": "Remote", "url": "python-ai-backend-developer-example-corp-remote"}
+        ],
+        "fullyRemote": false,
+        "type": "hybrid"
+      },
+      "salary": {
+        "from": 11760.0,
+        "to": 15120.0,
+        "type": "b2b",
+        "currency": "PLN",
+        "period": "Month"
+      },
+      "tiles": {
+        "values": [
+          {"value": "Python", "type": "requirement"}
+        ]
+      },
+      "reference": "REF-PY-001",
+      "posted": 1795103022506,
+      "renewed": 1795535022506
+    },
+    {
+      "id": "remote-ml-engineer-sample-ai-Remote",
+      "url": "remote-ml-engineer-sample-ai-remote",
+      "title": "Junior/Mid AI Engineer",
+      "name": "Sample AI Labs",
+      "category": "artificial-intelligence",
+      "technology": "Python",
+      "seniority": ["Junior", "Mid"],
+      "fullyRemote": true,
+      "location": {
+        "places": [
+          {"city": "Remote", "url": "remote-ml-engineer-sample-ai-remote"}
+        ],
+        "fullyRemote": true,
+        "type": "remote"
+      },
+      "salary": {
+        "from": 14000.0,
+        "to": 20000.0,
+        "type": "permanent",
+        "currency": "PLN",
+        "period": "Month"
+      },
+      "tiles": {
+        "values": [
+          {"value": "artificial-intelligence", "type": "category"},
+          {"value": "Python", "type": "requirement"},
+          {"value": "LLM", "type": "requirement"}
+        ]
+      },
+      "reference": "REF-AI-002",
+      "posted": 1795400000000,
+      "renewed": 1795400000000
+    },
+    {
+      "id": "krakow-php-dev-legacy-corp-Krakow",
+      "url": "krakow-php-dev-legacy-corp-krakow",
+      "title": "Mid PHP Developer",
+      "name": "Legacy Corp",
+      "category": "backend",
+      "technology": "PHP",
+      "seniority": ["Mid"],
+      "fullyRemote": false,
+      "location": {
+        "places": [
+          {
+            "country": {"code": "POL", "name": "Poland"},
+            "city": "Kraków",
+            "url": "krakow-php-dev-legacy-corp-krakow"
+          }
+        ],
+        "fullyRemote": false,
+        "type": "onsite"
+      },
+      "salary": {
+        "from": 10000.0,
+        "to": 14000.0,
+        "type": "b2b",
+        "currency": "PLN",
+        "period": "Month"
+      },
+      "tiles": {
+        "values": [
+          {"value": "PHP", "type": "requirement"},
+          {"value": "Symfony", "type": "requirement"}
+        ]
+      },
+      "reference": "REF-PHP-003",
+      "posted": 1795300000000
+    }
+  ]
+}
